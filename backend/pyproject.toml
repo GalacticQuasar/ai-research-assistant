@@ -1,0 +1,16 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "AI Research Assistant backend (FastAPI)"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "openai>=3.28.0",
+    "pypdf>=6.20.0",
+    "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.32",
+    "sqlmodel>=0.0.48",
+    "uvicorn[standard]>=0.54.0",
+]
