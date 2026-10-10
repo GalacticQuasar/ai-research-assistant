@@ -21,11 +21,13 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-# arXiv doesn't index stop words, so requiring one (e.g. "all:is") matches almost nothing
+# arXiv doesn't index stop words, so requiring one (e.g. "all:is") matches almost nothing.
+# Lucene's standard English stop words, plus a few common query filler words.
 STOP_WORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
-    "how", "in", "into", "is", "it", "of", "on", "or", "the", "to", "via", "we", "what",
-    "when", "which", "with", "you", "your",
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
+    "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+    "there", "these", "they", "this", "to", "was", "will", "with",
+    "can", "do", "does", "from", "how", "via", "we", "what", "when", "which", "you", "your",
 }
 
 

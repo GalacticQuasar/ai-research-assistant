@@ -9,7 +9,8 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session, col, delete, select
 
 from .db import PDF_DIR, engine, get_session, init_db
-from .models import ChatMessage, Paper, PaperCreate, PaperRead, SearchResult
+from .llm import LLMError, answer_question, summarize
+from .models import ChatMessage, Paper, PaperCreate, PaperRead, QuestionIn, SearchResult
 from .pdf import download_pdf, extract_text
 from .search import RateLimitedError, search_arxiv
 
@@ -157,4 +158,76 @@ def delete_paper(paper_id: int, session: Session = Depends(get_session)):
     if paper.pdf_path:
         Path(paper.pdf_path).unlink(missing_ok=True)
     session.delete(paper)
+    session.commit()
+
+
+def require_full_text(paper: Paper) -> None:
+    if paper.text_status == "pending":
+        raise HTTPException(409, "The paper's full text is still being processed. Try again shortly.")
+    if paper.text_status != "ready" or not paper.full_text:
+        raise HTTPException(409, "The paper's full text is not available, so it can't be analyzed.")
+
+
+@app.post("/api/papers/{paper_id}/summary", response_model=PaperRead)
+def generate_summary(
+    paper_id: int,
+    regenerate: bool = False,
+    session: Session = Depends(get_session),
+):
+    paper = get_paper_or_404(session, paper_id)
+    if paper.summary and not regenerate:
+        return PaperRead.from_paper(paper)
+    require_full_text(paper)
+    try:
+        paper.summary = summarize(paper)
+    except LLMError as e:
+        raise HTTPException(502, str(e)) from e
+    session.add(paper)
+    session.commit()
+    session.refresh(paper)
+    return PaperRead.from_paper(paper)
+
+
+def get_chat_history(session: Session, paper_id: int) -> list[ChatMessage]:
+    return list(
+        session.exec(
+            select(ChatMessage)
+            .where(ChatMessage.paper_id == paper_id)
+            .order_by(col(ChatMessage.created_at), col(ChatMessage.id))
+        ).all()
+    )
+
+
+@app.get("/api/papers/{paper_id}/chat", response_model=list[ChatMessage])
+def list_chat(paper_id: int, session: Session = Depends(get_session)):
+    get_paper_or_404(session, paper_id)
+    return get_chat_history(session, paper_id)
+
+
+@app.post("/api/papers/{paper_id}/chat", response_model=list[ChatMessage])
+def ask_question(paper_id: int, data: QuestionIn, session: Session = Depends(get_session)):
+    """Ask a question about a paper; returns the new user and assistant messages."""
+    paper = get_paper_or_404(session, paper_id)
+    require_full_text(paper)
+    history = get_chat_history(session, paper_id)
+    try:
+        reply = answer_question(paper, history, data.question)
+    except LLMError as e:
+        raise HTTPException(502, str(e)) from e
+
+    # Only store the exchange once the LLM has answered, so failed calls leave no orphan question
+    user_msg = ChatMessage(paper_id=paper_id, role="user", content=data.question)
+    assistant_msg = ChatMessage(paper_id=paper_id, role="assistant", content=reply)
+    session.add(user_msg)
+    session.add(assistant_msg)
+    session.commit()
+    session.refresh(user_msg)
+    session.refresh(assistant_msg)
+    return [user_msg, assistant_msg]
+
+
+@app.delete("/api/papers/{paper_id}/chat", status_code=204)
+def clear_chat(paper_id: int, session: Session = Depends(get_session)):
+    get_paper_or_404(session, paper_id)
+    session.exec(delete(ChatMessage).where(col(ChatMessage.paper_id) == paper_id))
     session.commit()

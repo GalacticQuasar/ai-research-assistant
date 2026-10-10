@@ -1,0 +1,107 @@
+"""LLM access through OpenRouter's OpenAI-compatible API."""
+
+import os
+from pathlib import Path
+
+import openai
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from .models import ChatMessage, Paper
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507"
+# ~50k tokens of paper text; enough for a typical paper and well within the model's context
+MAX_PAPER_CHARS = 200_000
+MAX_HISTORY_MESSAGES = 10
+
+
+class LLMError(Exception):
+    pass
+
+
+def _client() -> OpenAI:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise LLMError("OPENROUTER_API_KEY is not set. Add it to backend/.env.")
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        default_headers={"X-Title": "AI Research Assistant"},
+    )
+
+
+def _complete(messages: list[dict]) -> str:
+    try:
+        resp = _client().chat.completions.create(
+            model=os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=2000,
+        )
+    except openai.APIError as e:
+        # Surface only the provider's human-readable message, not the raw body (it includes account IDs)
+        body = e.body if isinstance(e.body, dict) else {}
+        error = body.get("error", body)
+        detail = error.get("message") if isinstance(error, dict) else None
+        raise LLMError(f"LLM request failed: {detail or type(e).__name__}") from e
+    content = resp.choices[0].message.content if resp.choices else None
+    if not content:
+        raise LLMError("LLM returned an empty response")
+    return content.strip()
+
+
+def _paper_context(paper: Paper) -> str:
+    text = paper.full_text or ""
+    note = ""
+    if len(text) > MAX_PAPER_CHARS:
+        text = text[:MAX_PAPER_CHARS]
+        note = "\n[Paper text truncated due to length.]"
+    authors = ", ".join(paper.authors) or "Unknown"
+    return (
+        f"Title: {paper.title}\n"
+        f"Authors: {authors}\n"
+        f"Year: {paper.year or 'Unknown'}\n\n"
+        f"--- FULL TEXT ---\n{text}{note}\n--- END OF PAPER ---"
+    )
+
+
+SUMMARY_PROMPT = """You are a research assistant. Summarize the paper below for a researcher \
+who has not read it. Base the summary on the full text, not just the abstract.
+
+Use Markdown with exactly these sections:
+## TL;DR
+One or two sentences.
+## Problem
+What problem the paper addresses and why it matters.
+## Approach
+The main idea and how the method works.
+## Key Results
+The most important findings, with numbers where the paper gives them.
+## Limitations
+Limitations stated by the authors or evident from the paper.
+
+Be concise (about 300-450 words). Do not invent details that are not in the paper.
+
+{paper}"""
+
+
+def summarize(paper: Paper) -> str:
+    return _complete([{"role": "user", "content": SUMMARY_PROMPT.format(paper=_paper_context(paper))}])
+
+
+QA_SYSTEM_PROMPT = """You are a research assistant answering questions about one paper. \
+Answer using the paper's content below. Quote or cite section names when helpful. \
+If the paper does not contain the answer, say so plainly instead of guessing; you may then \
+add general background knowledge, clearly labeled as not coming from the paper. \
+Answer in concise Markdown.
+
+{paper}"""
+
+
+def answer_question(paper: Paper, history: list[ChatMessage], question: str) -> str:
+    messages = [{"role": "system", "content": QA_SYSTEM_PROMPT.format(paper=_paper_context(paper))}]
+    messages += [{"role": m.role, "content": m.content} for m in history[-MAX_HISTORY_MESSAGES:]]
+    messages.append({"role": "user", "content": question})
+    return _complete(messages)

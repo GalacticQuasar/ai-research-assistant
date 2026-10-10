@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from sqlmodel import JSON, Column, Field, SQLModel
 
 
@@ -74,3 +75,7 @@ class PaperRead(BaseModel):
             **paper.model_dump(exclude={"full_text", "pdf_path"}),
             has_pdf=paper.pdf_path is not None,
         )
+
+
+class QuestionIn(BaseModel):
+    question: str = PydanticField(min_length=1, max_length=2000)
