@@ -1,17 +1,18 @@
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session, col, delete, select
 
 from .db import PDF_DIR, engine, get_session, init_db
-from .llm import LLMError, answer_question, summarize
+from .llm import LLMError, answer_question, extract_metadata, summarize
 from .models import ChatMessage, Paper, PaperCreate, PaperRead, QuestionIn, SearchResult
-from .pdf import download_pdf, extract_text
+from .pdf import MAX_PDF_BYTES, clean_line_breaks, download_pdf, extract_text, guess_metadata
 from .search import RateLimitedError, search_arxiv
 
 log = logging.getLogger("uvicorn.error")
@@ -111,6 +112,48 @@ def save_paper(
     session.refresh(paper)
     if data.pdf_url:
         background.add_task(fetch_full_text, paper.id)
+    return PaperRead.from_paper(paper)
+
+
+@app.post("/api/papers/upload", response_model=PaperRead, status_code=201)
+def upload_paper(file: UploadFile = File(...), session: Session = Depends(get_session)):
+    filename = file.filename or "upload.pdf"
+    data = file.file.read(MAX_PDF_BYTES + 1)
+    if len(data) > MAX_PDF_BYTES:
+        raise HTTPException(413, "PDF is larger than 50 MB")
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(400, "The uploaded file is not a PDF")
+
+    dest = PDF_DIR / f"upload-{uuid.uuid4().hex}.pdf"
+    dest.write_bytes(data)
+    try:
+        text = extract_text(dest)
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "Could not read this PDF. It may be corrupted or encrypted.") from e
+
+    # Prefer LLM-extracted metadata; fall back to heuristics so uploads still work without the LLM
+    metadata = guess_metadata(dest, text, filename)
+    if text:
+        try:
+            metadata = extract_metadata(text)
+        except LLMError:
+            log.exception("LLM metadata extraction failed for %s; using heuristics", filename)
+    metadata["title"] = clean_line_breaks(metadata["title"])
+    if metadata["abstract"]:
+        metadata["abstract"] = clean_line_breaks(metadata["abstract"])
+
+    paper = Paper(
+        source="upload",
+        **metadata,
+        pdf_path=str(dest),
+        full_text=text or None,
+        # Scanned PDFs have no text layer, so there's nothing to summarize
+        text_status="ready" if text else "failed",
+    )
+    session.add(paper)
+    session.commit()
+    session.refresh(paper)
     return PaperRead.from_paper(paper)
 
 

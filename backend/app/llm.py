@@ -1,6 +1,8 @@
 """LLM access through OpenRouter's OpenAI-compatible API."""
 
+import json
 import os
+import re
 from pathlib import Path
 
 import openai
@@ -32,13 +34,13 @@ def _client() -> OpenAI:
     )
 
 
-def _complete(messages: list[dict]) -> str:
+def _complete(messages: list[dict], max_tokens: int = 2000) -> str:
     try:
         resp = _client().chat.completions.create(
             model=os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL,
             messages=messages,
             temperature=0.2,
-            max_tokens=2000,
+            max_tokens=max_tokens,
         )
     except openai.APIError as e:
         # Surface only the provider's human-readable message, not the raw body (it includes account IDs)
@@ -105,3 +107,46 @@ def answer_question(paper: Paper, history: list[ChatMessage], question: str) -> 
     messages += [{"role": m.role, "content": m.content} for m in history[-MAX_HISTORY_MESSAGES:]]
     messages.append({"role": "user", "content": question})
     return _complete(messages)
+
+
+METADATA_PROMPT = """Extract bibliographic metadata from the beginning of a research paper.
+
+Return ONLY a JSON object with these keys:
+- "title": the paper title (string)
+- "authors": list of author full names in order (strings only, no affiliations or emails)
+- "year": publication year as an integer, or null if it cannot be determined
+- "abstract": the paper's abstract copied verbatim (string), or null if there is none
+
+Paper text:
+{text}"""
+
+
+def extract_metadata(text: str) -> dict:
+    """Ask the LLM for title/authors/year/abstract; raises LLMError if the output is unusable."""
+    raw = _complete(
+        [{"role": "user", "content": METADATA_PROMPT.format(text=text[:12_000])}],
+        max_tokens=1500,
+    )
+    # Models sometimes wrap JSON in ```json fences or add prose around it
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    try:
+        data = json.loads(match.group(0) if match else raw)
+    except json.JSONDecodeError as e:
+        raise LLMError("LLM returned invalid JSON for paper metadata") from e
+
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise LLMError("LLM did not return a paper title")
+    authors = data.get("authors") or []
+    year = data.get("year")
+    abstract = data.get("abstract")
+    try:
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year = None
+    return {
+        "title": title.strip(),
+        "authors": [a.strip() for a in authors if isinstance(a, str) and a.strip()],
+        "year": year,
+        "abstract": abstract.strip() if isinstance(abstract, str) and abstract.strip() else None,
+    }
