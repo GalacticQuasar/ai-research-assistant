@@ -21,10 +21,19 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# arXiv doesn't index stop words, so requiring one (e.g. "all:is") matches almost nothing
+STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
+    "how", "in", "into", "is", "it", "of", "on", "or", "the", "to", "via", "we", "what",
+    "when", "which", "with", "you", "your",
+}
+
+
 def _build_query(q: str) -> str:
     # Require every keyword to appear somewhere in the paper (title, abstract, etc.)
     terms = re.findall(r"[\w\-]+", q)
-    return " AND ".join(f"all:{t}" for t in terms)
+    keywords = [t for t in terms if t.lower() not in STOP_WORDS] or terms
+    return " AND ".join(f"all:{t}" for t in keywords)
 
 
 def search_arxiv(q: str, limit: int = 10) -> list[SearchResult]:
