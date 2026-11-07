@@ -26,9 +26,9 @@ export default function SummaryPanel({ paper, onUpdated }: SummaryPanelProps) {
   }
 
   return (
-    <section className="panel">
+    <section className="paper-section">
       <div className="section-header">
-        <h3>AI summary</h3>
+        <h2>Summary</h2>
         {paper.summary ? (
           <button className="secondary" onClick={() => generate(true)} disabled={loading || !ready}>
             {loading ? 'Regenerating…' : 'Regenerate'}
@@ -47,10 +47,10 @@ export default function SummaryPanel({ paper, onUpdated }: SummaryPanelProps) {
         </div>
       )}
       {!paper.summary && !loading && (
-        <p className="muted">
+        <p className="muted small">
           {ready
-            ? 'Generate a summary based on the full text of the paper.'
-            : 'The summary will be available once the full text has loaded.'}
+            ? 'Generate a summary of the problem, approach, results, and limitations from the full text.'
+            : 'You can generate a summary once the full text has loaded.'}
         </p>
       )}
     </section>

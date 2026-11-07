@@ -66,25 +66,31 @@ export default function SearchPage() {
 
   return (
     <section>
-      <h2>Search papers</h2>
-      <form className="search-form" onSubmit={onSubmit}>
-        <input
-          type="search"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Keywords or a research topic, e.g. diffusion models"
-          autoFocus
-        />
-        <button type="submit" disabled={loading || !input.trim()}>
-          {loading ? 'Searching…' : 'Search'}
-        </button>
-      </form>
-      <p className="muted small">Results come from arXiv.</p>
+      <div className="search-hero">
+        <h1>Search arXiv for papers</h1>
+        <form className="search-form" onSubmit={onSubmit} role="search">
+          <input
+            type="search"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="diffusion models, protein folding…"
+            aria-label="Keywords or a research topic"
+            autoFocus
+          />
+          <button type="submit" disabled={loading || !input.trim()}>
+            {loading ? 'Searching…' : 'Search'}
+          </button>
+        </form>
+        <p className="hint muted small">Enter keywords or a topic. Save a result to summarize it and ask questions.</p>
+      </div>
 
-      {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Searching arXiv…</p>}
-      {!loading && results?.length === 0 && <p className="muted">No papers found. Try different keywords.</p>}
+      <div className="notice">
+        {error && <p className="error">{error}</p>}
+        {loading && <p className="muted">Searching arXiv…</p>}
+        {!loading && results?.length === 0 && <p className="muted">No papers found. Try different keywords.</p>}
+      </div>
 
+      <div className="entries">
       {!loading &&
         results?.map((r) => (
           <PaperCard
@@ -97,9 +103,9 @@ export default function SearchPage() {
             actions={
               r.saved_id ? (
                 <>
-                  <span className="saved">✓ Saved</span>
+                  <span className="saved">Saved</span>
                   <Link className="button secondary" to={`/papers/${r.saved_id}`}>
-                    Open
+                    Open paper
                   </Link>
                 </>
               ) : (
@@ -110,6 +116,7 @@ export default function SearchPage() {
             }
           />
         ))}
+      </div>
     </section>
   )
 }

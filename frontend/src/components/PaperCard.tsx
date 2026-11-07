@@ -22,44 +22,45 @@ export default function PaperCard({ title, authors, year, abstract, url, detailH
   const shownAbstract = long && !expanded ? `${abstract!.slice(0, ABSTRACT_PREVIEW_CHARS).trimEnd()}…` : abstract
 
   return (
-    <article className="card">
-      <h3 className="card-title">
-        {detailHref ? (
-          <Link to={detailHref}>{title}</Link>
-        ) : url ? (
-          <a href={url} target="_blank" rel="noreferrer">
-            {title}
-          </a>
-        ) : (
-          title
-        )}
-      </h3>
-      <p className="meta">
-        {formatAuthors(authors)}
-        {year && <> · {year}</>}
-        {url && (
-          <>
-            {' · '}
+    <article className="entry">
+      <div className="entry-year">{year ?? <span className="small">n.d.</span>}</div>
+      <div>
+        <h3 className="entry-title">
+          {detailHref ? (
+            <Link to={detailHref}>{title}</Link>
+          ) : url ? (
             <a href={url} target="_blank" rel="noreferrer">
-              Link ↗
+              {title}
             </a>
-          </>
-        )}
-      </p>
-      {badges && <div className="badges">{badges}</div>}
-      {shownAbstract ? (
-        <p className="abstract">
-          {shownAbstract}{' '}
-          {long && (
-            <button className="link-button" onClick={() => setExpanded(!expanded)}>
-              {expanded ? 'Show less' : 'Show more'}
-            </button>
+          ) : (
+            title
           )}
-        </p>
-      ) : (
-        <p className="abstract muted">No abstract available.</p>
-      )}
-      {actions && <div className="actions">{actions}</div>}
+        </h3>
+        <p className="authors">{formatAuthors(authors)}</p>
+        {badges && <div className="statuses">{badges}</div>}
+        {shownAbstract ? (
+          <p className="abstract">
+            {shownAbstract}
+            {long && (
+              <button className="link-button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
+                {expanded ? 'Show less' : 'Read full abstract'}
+              </button>
+            )}
+          </p>
+        ) : (
+          <p className="abstract muted">No abstract available.</p>
+        )}
+        {(actions || url) && (
+          <div className="actions">
+            {actions}
+            {url && (
+              <a href={url} target="_blank" rel="noreferrer">
+                arXiv page
+              </a>
+            )}
+          </div>
+        )}
+      </div>
     </article>
   )
 }

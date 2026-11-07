@@ -51,51 +51,62 @@ export default function LibraryPage() {
       await api.deletePaper(paper.id)
       setPapers((ps) => ps?.filter((p) => p.id !== paper.id) ?? null)
     } catch (err) {
-      setError(`Delete failed: ${(err as Error).message}`)
+      setError(`Could not remove the paper: ${(err as Error).message}`)
     }
   }
 
   return (
     <section>
-      <div className="section-header">
-        <h2>My library</h2>
+      <div className="page-header">
+        <div>
+          <h1>Library</h1>
+          {papers && papers.length > 0 && (
+            <p className="muted small">
+              {papers.length} {papers.length === 1 ? 'paper' : 'papers'}
+            </p>
+          )}
+        </div>
         <button onClick={() => fileInput.current?.click()} disabled={uploading}>
           {uploading ? 'Uploading…' : 'Upload PDF'}
         </button>
         <input ref={fileInput} type="file" accept="application/pdf,.pdf" onChange={onUpload} hidden />
       </div>
-      {uploading && <p className="muted">Extracting text and metadata from the PDF. This takes about 10 seconds…</p>}
-      {error && <p className="error">{error}</p>}
 
-      {papers === null && !error && <p className="muted">Loading…</p>}
-      {papers?.length === 0 && (
-        <p className="muted">
-          Your library is empty. <Link to="/">Search for papers</Link> to save, or upload a PDF.
-        </p>
-      )}
+      <div className="notice">
+        {uploading && <p className="muted">Extracting text and metadata from the PDF. This takes about 10 seconds…</p>}
+        {error && <p className="error">{error}</p>}
+        {papers === null && !error && <p className="muted">Loading…</p>}
+        {papers?.length === 0 && (
+          <p className="muted">
+            Your library is empty. <Link to="/">Search arXiv</Link> and save a paper, or upload a PDF.
+          </p>
+        )}
+      </div>
 
-      {papers?.map((p) => (
-        <PaperCard
-          key={p.id}
-          title={p.title}
-          authors={p.authors}
-          year={p.year}
-          abstract={p.abstract}
-          url={p.url}
-          detailHref={`/papers/${p.id}`}
-          badges={<PaperBadges paper={p} />}
-          actions={
-            <>
-              <Link className="button" to={`/papers/${p.id}`}>
-                Open
-              </Link>
-              <button className="danger" onClick={() => onDelete(p)}>
-                Delete
-              </button>
-            </>
-          }
-        />
-      ))}
+      <div className="entries">
+        {papers?.map((p) => (
+          <PaperCard
+            key={p.id}
+            title={p.title}
+            authors={p.authors}
+            year={p.year}
+            abstract={p.abstract}
+            url={p.url}
+            detailHref={`/papers/${p.id}`}
+            badges={<PaperBadges paper={p} />}
+            actions={
+              <>
+                <Link className="button" to={`/papers/${p.id}`}>
+                  Open paper
+                </Link>
+                <button className="danger" onClick={() => onDelete(p)}>
+                  Remove
+                </button>
+              </>
+            }
+          />
+        ))}
+      </div>
     </section>
   )
 }

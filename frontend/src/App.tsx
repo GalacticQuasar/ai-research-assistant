@@ -1,4 +1,4 @@
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Link, NavLink, Route, Routes } from 'react-router-dom'
 import LibraryPage from './pages/LibraryPage'
 import PaperDetailPage from './pages/PaperDetailPage'
 import SearchPage from './pages/SearchPage'
@@ -8,7 +8,9 @@ function App() {
     <BrowserRouter>
       <header className="topbar">
         <div className="topbar-inner">
-          <span className="brand">📚 AI Research Assistant</span>
+          <Link to="/" className="brand">
+            Research Assistant
+          </Link>
           <nav>
             <NavLink to="/" end>
               Search

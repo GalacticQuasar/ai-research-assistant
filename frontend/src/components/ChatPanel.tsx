@@ -22,14 +22,16 @@ export default function ChatPanel({ paperId, ready }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const logRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     api.getChat(paperId).then(setMessages).catch((e: Error) => setError(e.message))
   }, [paperId])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    // Scroll the log itself, not the page, so opening a paper doesn't jump to the chat
+    const log = logRef.current
+    if (log) log.scrollTop = log.scrollHeight
   }, [messages, pendingQuestion])
 
   async function ask(question: string) {
@@ -67,37 +69,41 @@ export default function ChatPanel({ paperId, ready }: ChatPanelProps) {
   const disabled = !ready || pendingQuestion !== null
 
   return (
-    <section className="panel">
+    <aside className="margin" aria-label="Questions about this paper">
       <div className="section-header">
-        <h3>Ask about this paper</h3>
+        <h2>Ask about this paper</h2>
         {messages.length > 0 && (
           <button className="secondary" onClick={clear} disabled={pendingQuestion !== null}>
-            Clear chat
+            Clear
           </button>
         )}
       </div>
 
-      {!ready && <p className="muted">Questions can be asked once the full text has loaded.</p>}
+      {!ready && <p className="muted">You can ask questions once the full text has loaded.</p>}
 
-      <div className="chat-log">
+      <div className="chat-log" ref={logRef}>
         {messages.map((m) => (
           <div key={m.id} className={`message ${m.role}`}>
-            {m.role === 'assistant' ? <Markdown>{m.content}</Markdown> : m.content}
+            {m.role === 'assistant' ? <Markdown>{m.content}</Markdown> : <mark>{m.content}</mark>}
           </div>
         ))}
         {pendingQuestion && (
           <>
-            <div className="message user">{pendingQuestion}</div>
-            <div className="message assistant muted">Thinking…</div>
+            <div className="message user">
+              <mark>{pendingQuestion}</mark>
+            </div>
+            <div className="message thinking" role="status">
+              Reading the paper…
+            </div>
           </>
         )}
-        <div ref={bottomRef} />
       </div>
 
       {error && <p className="error">{error}</p>}
 
       {ready && messages.length === 0 && !pendingQuestion && (
         <div className="chips">
+          <p className="muted small">Try one of these, or write your own:</p>
           {EXAMPLE_QUESTIONS.map((q) => (
             <button key={q} className="chip" onClick={() => ask(q)}>
               {q}
@@ -110,7 +116,8 @@ export default function ChatPanel({ paperId, ready }: ChatPanelProps) {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={ready ? 'Ask a question about this paper…' : 'Waiting for full text…'}
+          placeholder={ready ? 'Ask a question…' : 'Waiting for full text…'}
+          aria-label="Your question"
           disabled={disabled}
           maxLength={2000}
         />
@@ -118,6 +125,6 @@ export default function ChatPanel({ paperId, ready }: ChatPanelProps) {
           Ask
         </button>
       </form>
-    </section>
+    </aside>
   )
 }
