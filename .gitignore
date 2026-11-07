@@ -5,6 +5,9 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
+htmlcov/
 
 # App data (SQLite DB, uploaded/downloaded PDFs)
 backend/data/
