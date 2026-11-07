@@ -14,7 +14,7 @@ A web app for finding, organizing, and understanding research papers. Search arX
 
 | Layer | Technology |
 | --- | --- |
-| Frontend | React 19, TypeScript, Vite, React Router, react-markdown |
+| Frontend | React 19, TypeScript, Vite, React Router, react-markdown; Hanken Grotesk and Newsreader fonts from Google Fonts (system fonts are used offline) |
 | Backend | Python 3.13, FastAPI, SQLModel |
 | Database | SQLite (`backend/data/library.db`) |
 | Paper search | [arXiv API](https://info.arxiv.org/help/api/) (no API key needed) |
@@ -126,6 +126,7 @@ Interactive API documentation is available at http://localhost:8000/docs.
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
+| `GET` | `/api/health` | Health check; returns `{"status": "ok"}` |
 | `GET` | `/api/search?q=&limit=` | Search arXiv. Results already saved include `saved_id`. |
 | `GET` | `/api/papers` | List saved papers, newest first |
 | `POST` | `/api/papers` | Save a search result. Full text loads in the background. |
