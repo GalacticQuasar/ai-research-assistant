@@ -19,7 +19,7 @@ A web app for finding, organizing, and understanding research papers. Search arX
 | Database | SQLite (`backend/data/library.db`) |
 | Paper search | [arXiv API](https://info.arxiv.org/help/api/) (no API key needed) |
 | PDF processing | pypdf |
-| LLM | [OpenRouter](https://openrouter.ai) via the `openai` SDK (default model: `qwen/qwen3-235b-a22b-2507`) |
+| LLM | [Purdue GenAI Studio](https://docs.rcac.purdue.edu/services/genai/) (default model: `gpt-oss:120b`) or [OpenRouter](https://openrouter.ai) (default model: `qwen/qwen3-235b-a22b-2507`), both via the `openai` SDK |
 
 ## Project structure
 
@@ -32,7 +32,7 @@ ai-research-assistant/
 │   │   ├── db.py         # SQLite engine and data directory setup
 │   │   ├── search.py     # arXiv search client
 │   │   ├── pdf.py        # PDF download, text extraction, metadata heuristics
-│   │   └── llm.py        # OpenRouter client: summaries, Q&A, metadata extraction
+│   │   └── llm.py        # GenAI Studio/OpenRouter client: summaries, Q&A, metadata extraction
 │   ├── data/             # Created at runtime (gitignored): library.db and PDFs
 │   ├── .env.example      # Template for the API key and model configuration
 │   └── pyproject.toml    # Python dependencies (managed with uv)
@@ -51,7 +51,7 @@ ai-research-assistant/
 - The **frontend** is a single-page React app. During development, Vite forwards every `/api/*` request to the FastAPI backend on port 8000.
 - **Saving a search result** stores its metadata immediately. A background task then downloads the arXiv PDF and extracts the text, and the paper's `text_status` moves from `pending` to `ready` (or `failed`). The UI polls until the text is ready.
 - **Uploading a PDF** validates the file, extracts its text, and asks the LLM for the metadata as JSON, all in one request (about 10 seconds).
-- **Summaries and Q&A** put the paper's full text (up to about 50k tokens) directly in the LLM prompt. A paper fits comfortably in the model's context window, so no vector database or retrieval step is needed.
+- **Summaries and Q&A** put the paper's full text directly in the LLM prompt, up to about 43k tokens on GenAI Studio and 50k on OpenRouter. A paper fits in the model's context window, so no vector database or retrieval step is needed.
 
 ## Setup
 
@@ -59,7 +59,9 @@ ai-research-assistant/
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs Python 3.13 automatically if needed
 - [Node.js](https://nodejs.org) 20.19+ or 22.12+, with npm
-- An [OpenRouter API key](https://openrouter.ai/keys). A few dollars of credit is plenty: a summary costs well under one cent with the default model.
+- An API key for one of the LLM services:
+  - **Purdue GenAI Studio** (default): requires a Purdue account. [Sign in](https://genai.rcac.purdue.edu/), then create a key under your avatar > **Settings > Account > API Keys**.
+  - **OpenRouter**: create an [API key](https://openrouter.ai/keys). A few dollars of credit is plenty: a summary costs well under one cent with the default model.
 
 ### 1. Configure the API key
 
@@ -68,14 +70,25 @@ cd backend
 cp .env.example .env
 ```
 
-Edit `backend/.env` and set your key:
+Edit `backend/.env`, choose a provider, and set its key. Only the selected provider's key is required:
 
 ```
-OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=qwen/qwen3-235b-a22b-2507
+LLM_PROVIDER=genai
+GENAI_API_KEY=...
+GENAI_MODEL=gpt-oss:120b
+
+# Or, to use OpenRouter:
+# LLM_PROVIDER=openrouter
+# OPENROUTER_API_KEY=sk-or-...
+# OPENROUTER_MODEL=qwen/qwen3-235b-a22b-2507
 ```
 
-`OPENROUTER_MODEL` can be any [OpenRouter model ID](https://openrouter.ai/models). Models with a context window of at least 128k tokens work best for long papers. `.env` is gitignored, so never commit it.
+Restart the backend after changing `.env`. `LLM_PROVIDER` defaults to `genai`.
+
+- `GENAI_MODEL` can be any model ID returned by `GET https://genai.rcac.purdue.edu/api/models`. See the [hosted models](https://docs.rcac.purdue.edu/services/genai/models/) page for context limits. Avoid models with a context below 65,536 tokens, such as `llama4:latest`, for long papers.
+- `OPENROUTER_MODEL` can be any [OpenRouter model ID](https://openrouter.ai/models). Models with a context window of at least 128k tokens work best for long papers.
+
+`.env` is gitignored, so never commit it.
 
 ### 2. Install dependencies
 
@@ -132,5 +145,6 @@ Interactive API documentation is available at http://localhost:8000/docs.
 - **Search ranking.** arXiv's relevance ranking is basic, and common stop words are removed from queries because arXiv doesn't index them. Searching for a paper's distinctive title words works best.
 - **Scanned PDFs.** PDFs without a text layer (scanned images) can be uploaded and viewed, but can't be summarized or questioned. There is no OCR.
 - **Metadata fallback.** If the LLM call fails during upload, the heuristic metadata can be wrong.
-- **Very long papers.** Text beyond about 50k tokens is truncated before it's sent to the LLM.
+- **Very long papers.** Text beyond about 43k tokens on GenAI Studio, or 50k on OpenRouter, is truncated before it's sent to the LLM.
+- **GenAI Studio rate limit.** The service allows 20 requests per minute per user and may return `null` instead of an HTTP error when that's exceeded. The backend retries with backoff, then shows an error asking you to try again in a minute.
 - **Single user, local only.** There is no authentication, and the app is meant to run on your own machine.

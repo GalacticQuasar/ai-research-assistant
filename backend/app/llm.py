@@ -1,8 +1,10 @@
-"""LLM access through OpenRouter's OpenAI-compatible API."""
+"""LLM access through OpenAI-compatible APIs (Purdue GenAI Studio or OpenRouter)."""
 
 import json
 import os
 import re
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import openai
@@ -13,43 +15,96 @@ from .models import ChatMessage, Paper
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-DEFAULT_MODEL = "qwen/qwen3-235b-a22b-2507"
-# ~50k tokens of paper text; enough for a typical paper and well within the model's context
-MAX_PAPER_CHARS = 200_000
+
+@dataclass(frozen=True)
+class Provider:
+    base_url: str
+    key_env: str
+    model_env: str
+    default_model: str
+    max_paper_chars: int
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+PROVIDERS = {
+    "genai": Provider(
+        base_url="https://genai.rcac.purdue.edu/api",
+        key_env="GENAI_API_KEY",
+        model_env="GENAI_MODEL",
+        default_model="gpt-oss:120b",
+        # ~43k tokens; leaves room for chat history and the response in the 65,536-token context
+        max_paper_chars=160_000,
+    ),
+    "openrouter": Provider(
+        base_url="https://openrouter.ai/api/v1",
+        key_env="OPENROUTER_API_KEY",
+        model_env="OPENROUTER_MODEL",
+        default_model="qwen/qwen3-235b-a22b-2507",
+        # ~50k tokens; well within the default model's context
+        max_paper_chars=200_000,
+        headers={"X-Title": "AI Research Assistant"},
+    ),
+}
+DEFAULT_PROVIDER = "genai"
 MAX_HISTORY_MESSAGES = 10
+# Reasoning counts toward this limit on models that output it, and can use well over 1,000 tokens
+MAX_OUTPUT_TOKENS = 4000
+REQUEST_TIMEOUT_SECONDS = 180
+# GenAI Studio may answer with a JSON null instead of an HTTP error when rate limited (20 requests/minute)
+NULL_RESPONSE_RETRY_DELAYS = (5, 15, 30)
 
 
 class LLMError(Exception):
     pass
 
 
-def _client() -> OpenAI:
-    api_key = os.getenv("OPENROUTER_API_KEY")
+def _provider() -> Provider:
+    name = (os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    provider = PROVIDERS.get(name)
+    if provider is None:
+        raise LLMError(f"Unknown LLM_PROVIDER '{name}'. Use one of: {', '.join(PROVIDERS)}.")
+    return provider
+
+
+def _client(provider: Provider) -> OpenAI:
+    api_key = os.getenv(provider.key_env)
     if not api_key:
-        raise LLMError("OPENROUTER_API_KEY is not set. Add it to backend/.env.")
+        raise LLMError(f"{provider.key_env} is not set. Add it to backend/.env.")
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url=provider.base_url,
         api_key=api_key,
-        default_headers={"X-Title": "AI Research Assistant"},
+        default_headers=provider.headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        max_retries=1,
     )
 
 
-def _complete(messages: list[dict], max_tokens: int = 2000) -> str:
-    try:
-        resp = _client().chat.completions.create(
-            model=os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
-    except openai.APIError as e:
-        # Surface only the provider's human-readable message, not the raw body (it includes account IDs)
-        body = e.body if isinstance(e.body, dict) else {}
-        error = body.get("error", body)
-        detail = error.get("message") if isinstance(error, dict) else None
-        raise LLMError(f"LLM request failed: {detail or type(e).__name__}") from e
+def _complete(messages: list[dict]) -> str:
+    provider = _provider()
+    client = _client(provider)
+    for delay in (*NULL_RESPONSE_RETRY_DELAYS, None):
+        try:
+            resp = client.chat.completions.create(
+                model=os.getenv(provider.model_env) or provider.default_model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+        except openai.APIError as e:
+            # Surface only the provider's human-readable message, not the raw body (it includes account IDs)
+            body = e.body if isinstance(e.body, dict) else {}
+            error = body.get("error", body)
+            detail = error.get("message") if isinstance(error, dict) else None
+            raise LLMError(f"LLM request failed: {detail or type(e).__name__}") from e
+        if resp is not None:
+            break
+        if delay is None:
+            raise LLMError("The LLM service is rate-limiting requests. Please try again in a minute.")
+        time.sleep(delay)
     content = resp.choices[0].message.content if resp.choices else None
     if not content:
+        if resp.choices and resp.choices[0].finish_reason == "length":
+            raise LLMError("The LLM reached its output limit before answering. Please try again.")
         raise LLMError("LLM returned an empty response")
     return content.strip()
 
@@ -57,8 +112,9 @@ def _complete(messages: list[dict], max_tokens: int = 2000) -> str:
 def _paper_context(paper: Paper) -> str:
     text = paper.full_text or ""
     note = ""
-    if len(text) > MAX_PAPER_CHARS:
-        text = text[:MAX_PAPER_CHARS]
+    max_chars = _provider().max_paper_chars
+    if len(text) > max_chars:
+        text = text[:max_chars]
         note = "\n[Paper text truncated due to length.]"
     authors = ", ".join(paper.authors) or "Unknown"
     return (
@@ -123,10 +179,7 @@ Paper text:
 
 def extract_metadata(text: str) -> dict:
     """Ask the LLM for title/authors/year/abstract; raises LLMError if the output is unusable."""
-    raw = _complete(
-        [{"role": "user", "content": METADATA_PROMPT.format(text=text[:12_000])}],
-        max_tokens=1500,
-    )
+    raw = _complete([{"role": "user", "content": METADATA_PROMPT.format(text=text[:12_000])}])
     # Models sometimes wrap JSON in ```json fences or add prose around it
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     try:
