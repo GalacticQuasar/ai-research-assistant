@@ -14,7 +14,19 @@ npm run build   # type-check (tsc -b) and build
 npm run lint    # oxlint
 ```
 
-There is no test suite yet.
+```bash
+# Backend (from backend/)
+uv run pytest                                            # tests
+uv run pytest --cov --cov-report=term --cov-report=html  # coverage; HTML in htmlcov/
+rm -rf mutants && uv run mutmut run                      # mutation testing; then `uv run mutmut results`
+uv run python -m tests.export_openapi                    # regenerate contract/openapi.json after API changes
+
+# Frontend (from frontend/)
+npm test           # tests
+npm run coverage   # coverage
+```
+
+Seven tests fail on purpose because they detect known app bugs. See "Testing" in `README.md` for the list, what each test file covers, and expected results.
 
 ## Layout
 
