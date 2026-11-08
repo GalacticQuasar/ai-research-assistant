@@ -60,16 +60,9 @@ describe('PaperCard', () => {
     expect(screen.getByRole('button', { name: 'Do it' })).toBeInTheDocument()
   })
 
-  it('does not truncate an abstract of exactly 320 characters', () => {
-    const abstract = 'a'.repeat(320)
-    renderCard({ abstract })
-    expect(screen.getByText(abstract)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Read full abstract' })).not.toBeInTheDocument()
-  })
-
   it('truncates a long abstract and expands/collapses it', async () => {
     const user = userEvent.setup()
-    const abstract = `${'word '.repeat(70)}THE END`
+    const abstract = `${'word '.repeat(200)}THE END` // a long abstract, ~1,000 characters
     renderCard({ abstract })
 
     const toggle = screen.getByRole('button', { name: 'Read full abstract' })

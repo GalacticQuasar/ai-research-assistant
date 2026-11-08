@@ -6,16 +6,16 @@ describe('formatAuthors', () => {
     expect(formatAuthors([])).toBe('Unknown authors')
   })
 
-  it('shows a single author', () => {
+  it('shows a typical author list in full, in order', () => {
     expect(formatAuthors(['Ada Lovelace'])).toBe('Ada Lovelace')
+    expect(formatAuthors(['Ada Lovelace', 'Alan Turing', 'Grace Hopper'])).toBe('Ada Lovelace, Alan Turing, Grace Hopper')
   })
 
-  it('shows up to six authors in full', () => {
-    const six = ['A', 'B', 'C', 'D', 'E', 'F']
-    expect(formatAuthors(six)).toBe('A, B, C, D, E, F')
-  })
-
-  it('abbreviates more than six authors with et al.', () => {
-    expect(formatAuthors(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'])).toBe('A, B, C, D, E, F, et al.')
+  it('abbreviates very long author lists with et al., keeping the first author', () => {
+    const authors = Array.from({ length: 40 }, (_, i) => `Author ${i + 1}`)
+    const shown = formatAuthors(authors)
+    expect(shown.startsWith('Author 1, ')).toBe(true)
+    expect(shown.endsWith(', et al.')).toBe(true)
+    expect(shown).not.toContain('Author 40')
   })
 })

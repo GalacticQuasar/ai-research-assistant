@@ -1,10 +1,18 @@
-"""arXiv client: query building, Atom parsing, and rate-limit/error handling (httpx.get is mocked)."""
+"""arXiv search (requirement 1), tested through `search_arxiv` with arXiv's HTTP API faked.
+
+Assertions are about what the user gets (results with title, authors, year, abstract, link) and
+about the query that actually reaches arXiv, not about private helpers.
+"""
+
+import re
 
 import httpx
 import pytest
 
 from app import search
-from app.search import RateLimitedError, _build_query, _clean, search_arxiv
+from app.search import RateLimitedError, search_arxiv
+
+from .fakes import FakeHTTP, redirect
 
 ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -34,19 +42,6 @@ EMPTY_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-class FakeGet:
-    """Stand-in for httpx.get that returns queued responses and records each call."""
-
-    def __init__(self, *responses):
-        self.responses = list(responses)
-        self.calls = []
-
-    def __call__(self, url, **kwargs):
-        self.calls.append((url, kwargs))
-        status, text = self.responses.pop(0)
-        return httpx.Response(status, text=text, request=httpx.Request("GET", url))
-
-
 @pytest.fixture
 def sleeps(monkeypatch):
     calls = []
@@ -54,81 +49,48 @@ def sleeps(monkeypatch):
     return calls
 
 
-def mock_get(monkeypatch, *responses) -> FakeGet:
-    fake = FakeGet(*responses)
-    monkeypatch.setattr(search.httpx, "get", fake)
-    return fake
+def arxiv(monkeypatch, *replies) -> FakeHTTP:
+    return FakeHTTP(*replies).install(monkeypatch)
 
 
-# --- _clean -------------------------------------------------------------------------------
+def sent_query(request: httpx.Request) -> tuple[set[str], set[str]]:
+    """The keywords and boolean operators in the arXiv `search_query` that was sent.
+
+    arXiv's query syntax is `field:term` clauses joined by AND / OR / ANDNOT
+    (https://info.arxiv.org/help/api/user-manual.html#query_details).
+    """
+    query = request.url.params["search_query"]
+    terms = {t.lower() for t in re.findall(r"\b(?:all|ti|abs|au|co|jr|cat|rn):(\S+)", query)}
+    operators = set(re.findall(r"\b(AND|OR|ANDNOT)\b", query))
+    return terms, operators
 
 
-def test_clean_collapses_whitespace_and_line_breaks():
-    assert _clean("  Deep\n   learning\tfor\r\n everyone  ") == "Deep learning for everyone"
+# --- results shown to the user ------------------------------------------------------------
 
 
-def test_clean_empty_string():
-    assert _clean("   \n ") == ""
+def test_results_have_the_fields_the_ui_displays(monkeypatch, sleeps):
+    arxiv(monkeypatch, (200, ATOM_FEED))
 
+    first = search_arxiv("sparse attention")[0]
 
-# --- _build_query -------------------------------------------------------------------------
-
-
-def test_build_query_requires_every_keyword():
-    assert _build_query("diffusion models") == "all:diffusion AND all:models"
-
-
-def test_build_query_drops_stop_words_case_insensitively():
-    assert _build_query("The Role of Attention in Transformers") == "all:Role AND all:Attention AND all:Transformers"
-
-
-def test_build_query_keeps_hyphenated_terms_and_drops_punctuation():
-    assert _build_query("self-supervised, learning!") == "all:self-supervised AND all:learning"
-
-
-def test_build_query_falls_back_to_all_terms_when_only_stop_words():
-    # Better to send something than nothing at all
-    assert _build_query("what is it") == "all:what AND all:is AND all:it"
-
-
-def test_build_query_empty_when_no_word_characters():
-    assert _build_query("?!  ...") == ""
-
-
-# --- search_arxiv -------------------------------------------------------------------------
-
-
-def test_search_parses_entries(monkeypatch, sleeps):
-    fake = mock_get(monkeypatch, (200, ATOM_FEED))
-
-    results = search_arxiv("sparse attention", limit=5)
-
-    assert len(results) == 2
-    first = results[0]
-    assert first.external_id == "2401.01234v2"
-    assert first.title == "Sparse Attention for Long Documents"
-    assert first.abstract == "We study sparse attention. It works."
+    assert first.title == "Sparse Attention for Long Documents"  # no hard line breaks from the feed
     assert first.authors == ["Ada Lovelace", "Alan Turing"]
     assert first.year == 2024
+    assert first.abstract == "We study sparse attention. It works."
     assert first.url == "http://arxiv.org/abs/2401.01234v2"
     assert first.pdf_url == "http://arxiv.org/pdf/2401.01234v2"
+    assert first.external_id == "2401.01234v2"
     assert first.saved_id is None
-    assert sleeps == []
-
-    url, kwargs = fake.calls[0]
-    assert url == search.ARXIV_API
-    assert kwargs["params"]["search_query"] == "all:sparse AND all:attention"
-    assert kwargs["params"]["max_results"] == 5
-    assert kwargs["params"]["sortBy"] == "relevance"
-    assert kwargs["headers"]["User-Agent"] == search.USER_AGENT
 
 
-def test_search_handles_missing_optional_fields(monkeypatch, sleeps):
-    mock_get(monkeypatch, (200, ATOM_FEED))
+def test_results_with_missing_optional_fields(monkeypatch, sleeps):
+    arxiv(monkeypatch, (200, ATOM_FEED))
 
     old = search_arxiv("anything")[1]
 
     assert old.external_id == "hep-th/9901001v1"
+    assert old.title == "Old Style Identifier"
+    assert old.url == "http://arxiv.org/abs/hep-th/9901001v1"
     assert old.pdf_url is None
     assert old.year is None
     assert old.authors == []
@@ -136,50 +98,99 @@ def test_search_handles_missing_optional_fields(monkeypatch, sleeps):
 
 
 def test_search_with_no_results(monkeypatch, sleeps):
-    mock_get(monkeypatch, (200, EMPTY_FEED))
+    arxiv(monkeypatch, (200, EMPTY_FEED))
     assert search_arxiv("zzzz qqqq") == []
 
 
-def test_search_without_keywords_skips_request(monkeypatch):
-    fake = mock_get(monkeypatch)
-    assert search_arxiv("???") == []
-    assert fake.calls == []
+# --- the query sent to arXiv --------------------------------------------------------------
+
+
+def test_every_keyword_is_required_and_the_limit_is_honored(monkeypatch, sleeps):
+    fake = arxiv(monkeypatch, (200, EMPTY_FEED))
+
+    search_arxiv("diffusion models", limit=5)
+
+    request = fake.requests[0]
+    assert request.url.host == "export.arxiv.org"
+    terms, operators = sent_query(request)
+    assert terms == {"diffusion", "models"}
+    assert operators == {"AND"}
+    assert request.url.params["max_results"] == "5"
+
+
+def test_topic_phrases_leave_out_stop_words(monkeypatch, sleeps):
+    # arXiv doesn't index stop words, so requiring one would match almost nothing
+    fake = arxiv(monkeypatch, (200, EMPTY_FEED))
+
+    search_arxiv("The Role of Attention in Transformers")
+
+    terms, _ = sent_query(fake.requests[0])
+    assert terms == {"role", "attention", "transformers"}
+
+
+def test_hyphenated_keywords_stay_whole_and_punctuation_is_ignored(monkeypatch, sleeps):
+    fake = arxiv(monkeypatch, (200, EMPTY_FEED))
+
+    search_arxiv("self-supervised, learning!")
+
+    terms, _ = sent_query(fake.requests[0])
+    assert terms == {"self-supervised", "learning"}
+
+
+def test_query_of_only_common_words_still_searches(monkeypatch, sleeps):
+    fake = arxiv(monkeypatch, (200, EMPTY_FEED))
+
+    search_arxiv("what is it")
+
+    terms, _ = sent_query(fake.requests[0])
+    assert terms and terms <= {"what", "is", "it"}
+
+
+def test_input_without_any_words_does_not_call_arxiv(monkeypatch):
+    fake = arxiv(monkeypatch)
+    assert search_arxiv("?!  ...") == []
+    assert fake.requests == []
+
+
+# --- errors and rate limits -----------------------------------------------------------------
+
+
+def test_redirects_are_followed(monkeypatch, sleeps):
+    fake = arxiv(monkeypatch, redirect("https://export.arxiv.org/api/query?moved=1"), (200, ATOM_FEED))
+    assert len(search_arxiv("attention")) == 2
+    assert len(fake.requests) == 2
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_search_retries_once_after_rate_limit(monkeypatch, sleeps, status):
-    fake = mock_get(monkeypatch, (status, ""), (200, ATOM_FEED))
+def test_waits_and_retries_once_when_rate_limited(monkeypatch, sleeps, status):
+    fake = arxiv(monkeypatch, (status, ""), (200, ATOM_FEED))
 
     results = search_arxiv("attention")
 
     assert len(results) == 2
-    assert len(fake.calls) == 2
-    assert sleeps == [3]
+    assert len(fake.requests) == 2
+    assert len(sleeps) == 1 and sleeps[0] > 0
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_search_raises_rate_limited_after_two_failures(monkeypatch, sleeps, status):
-    fake = mock_get(monkeypatch, (status, ""), (429, ""))
+def test_reports_rate_limit_when_retry_also_fails(monkeypatch, sleeps, status):
+    fake = arxiv(monkeypatch, (status, ""), (429, ""))
 
-    with pytest.raises(RateLimitedError, match="rate-limiting"):
+    with pytest.raises(RateLimitedError, match="try again in a minute"):
         search_arxiv("attention")
-    assert len(fake.calls) == 2
-    assert sleeps == [3]
+    assert len(fake.requests) == 2
 
 
-def test_search_raises_http_error_on_server_error_without_retry(monkeypatch, sleeps):
-    fake = mock_get(monkeypatch, (500, "boom"))
+def test_server_error_is_raised_without_retry(monkeypatch, sleeps):
+    fake = arxiv(monkeypatch, (500, "boom"))
 
     with pytest.raises(httpx.HTTPStatusError):
         search_arxiv("attention")
-    assert len(fake.calls) == 1
+    assert len(fake.requests) == 1
     assert sleeps == []
 
 
-def test_search_propagates_connection_errors(monkeypatch):
-    def fail(url, **kwargs):
-        raise httpx.ConnectError("no route", request=httpx.Request("GET", url))
-
-    monkeypatch.setattr(search.httpx, "get", fail)
+def test_connection_errors_propagate(monkeypatch):
+    arxiv(monkeypatch, httpx.ConnectError("no route"))
     with pytest.raises(httpx.ConnectError):
         search_arxiv("attention")

@@ -12,11 +12,11 @@ dotenv.load_dotenv = lambda *args, **kwargs: False  # noqa: E731
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
+from sqlmodel import Session, create_engine, select  # noqa: E402
 
 import app.db as db  # noqa: E402
 import app.main as main  # noqa: E402
-from app.models import Paper  # noqa: E402
+from app.models import ChatMessage, Paper  # noqa: E402
 
 from .pdfs import SAMPLE_PAPER_PAGES, write_pdf  # noqa: E402
 
@@ -94,6 +94,38 @@ def session(engine, client):
     # Depends on `client` so init_db() has created the tables
     with Session(engine) as s:
         yield s
+
+
+class Stored:
+    """Read what is actually persisted, through fresh sessions (no stale identity map)."""
+
+    def __init__(self, engine, pdf_dir):
+        self.engine = engine
+        self.pdf_dir = pdf_dir
+
+    def papers(self) -> list[Paper]:
+        with Session(self.engine) as s:
+            return list(s.exec(select(Paper).order_by(Paper.id)).all())
+
+    def paper(self, paper_id: int) -> Paper | None:
+        with Session(self.engine) as s:
+            return s.get(Paper, paper_id)
+
+    def messages(self, paper_id: int | None = None) -> list[ChatMessage]:
+        with Session(self.engine) as s:
+            query = select(ChatMessage).order_by(ChatMessage.id)
+            if paper_id is not None:
+                query = query.where(ChatMessage.paper_id == paper_id)
+            return list(s.exec(query).all())
+
+    def pdf_files(self) -> list[str]:
+        return sorted(p.name for p in self.pdf_dir.iterdir())
+
+
+@pytest.fixture
+def stored(engine, pdf_dir, client):
+    # Depends on `client` so init_db() has created the tables and the PDF folder
+    return Stored(engine, pdf_dir)
 
 
 @pytest.fixture
