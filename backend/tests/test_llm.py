@@ -5,6 +5,8 @@ from the README and requirements (providers, default models, summary sections, t
 not from the module's private constants.
 """
 
+import inspect
+import re
 from types import SimpleNamespace
 
 import httpx2
@@ -20,20 +22,78 @@ def completion(content, finish_reason="stop"):
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)])
 
 
+# Message shapes the OpenAI chat completions API accepts (https://platform.openai.com/docs/api-reference/chat/create)
+MESSAGE_KEYS = {
+    "system": {"role", "content", "name"},
+    "developer": {"role", "content", "name"},
+    "user": {"role", "content", "name"},
+    "assistant": {"role", "content", "name", "refusal", "tool_calls", "audio", "function_call"},
+    "tool": {"role", "content", "tool_call_id"},
+}
+
+
+def chat_request_problem(client: openai.OpenAI, kwargs: dict) -> str | None:
+    """Why the chat completions API would reject this request with HTTP 400, or None if it's valid."""
+    try:
+        # The real SDK method raises TypeError for unknown or missing arguments
+        inspect.signature(client.chat.completions.create).bind(**kwargs)
+    except TypeError as e:
+        return f"invalid arguments: {e}"
+    if not isinstance(kwargs["model"], str) or not kwargs["model"]:
+        return "model must be a non-empty string"
+    messages = kwargs["messages"]
+    if not isinstance(messages, list) or not messages:
+        return "messages must be a non-empty array"
+    for i, message in enumerate(messages):
+        if not isinstance(message, dict):
+            return f"messages[{i}] must be an object"
+        role = message.get("role")
+        if role not in MESSAGE_KEYS:
+            return f"messages[{i}].role: invalid value {role!r}"
+        extra = set(message) - MESSAGE_KEYS[role]
+        if extra:
+            return f"messages[{i}]: unrecognized keys {sorted(extra)}"
+        if not isinstance(message.get("content"), (str, list)):
+            return f"messages[{i}].content must be a string or an array of parts"
+    temperature = kwargs.get("temperature")
+    if temperature is not None and not (isinstance(temperature, (int, float)) and 0 <= temperature <= 2):
+        return "temperature must be between 0 and 2"
+    for key in ("max_tokens", "max_completion_tokens"):
+        value = kwargs.get(key)
+        if value is not None and not (isinstance(value, int) and value > 0):
+            return f"{key} must be a positive integer"
+    return None
+
+
+def bad_request(message: str) -> openai.BadRequestError:
+    request = httpx2.Request("POST", "https://llm.invalid/chat/completions")
+    return openai.BadRequestError(message, response=httpx2.Response(400, request=request),
+                                  body={"error": {"message": message}})
+
+
 class FakeOpenAI:
-    """Records constructor kwargs and create() calls; replies with queued responses or exceptions."""
+    """Stands in for openai.OpenAI. Validates like the real service, replies with queued responses.
+
+    The constructor builds a real SDK client from the same arguments (no request is made), so
+    arguments the SDK rejects fail here too. create() rejects requests the chat completions API
+    would answer with HTTP 400. Calls are recorded for assertions.
+    """
 
     instances: list["FakeOpenAI"] = []
     replies: list = []
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.real = openai.OpenAI(**kwargs)
         self.calls = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
         FakeOpenAI.instances.append(self)
 
     def _create(self, **kwargs):
         self.calls.append(kwargs)
+        problem = chat_request_problem(self.real, kwargs)
+        if problem:
+            raise bad_request(problem)
         reply = FakeOpenAI.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
@@ -97,6 +157,8 @@ def test_default_provider_is_genai_studio_with_its_default_model(genai):
     assert client.kwargs["base_url"].startswith("https://genai.rcac.purdue.edu")
     assert client.kwargs["api_key"] == "test-key"
     assert client.calls[0]["model"] == "gpt-oss:120b"
+    # A stalled provider must not hang the request forever
+    assert client.real.timeout is not None
 
 
 def test_openrouter_needs_only_its_own_key(fake_llm, monkeypatch):
@@ -110,6 +172,8 @@ def test_openrouter_needs_only_its_own_key(fake_llm, monkeypatch):
     assert client.kwargs["base_url"].startswith("https://openrouter.ai")
     assert client.kwargs["api_key"] == "or-key"
     assert client.calls[0]["model"] == "qwen/qwen3-235b-a22b-2507"
+    # OpenRouter attributes requests to the app by this header (https://openrouter.ai/docs/app-attribution)
+    assert client.real.default_headers.get("X-Title") == "AI Research Assistant"
 
 
 @pytest.mark.parametrize(
@@ -129,8 +193,10 @@ def test_model_can_be_overridden(fake_llm, monkeypatch, provider, key_env, model
 
 def test_unknown_provider_is_reported(fake_llm, monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "skynet")
-    with pytest.raises(LLMError, match="skynet"):
+    with pytest.raises(LLMError) as exc:
         summarize(make_paper())
+    # Shown to the user as the error detail: names the bad value and the valid choices
+    assert str(exc.value) == "Unknown LLM_PROVIDER 'skynet'. Use one of: genai, openrouter."
     assert fake_llm.instances == []
 
 
@@ -152,6 +218,9 @@ def test_summary_is_based_on_the_full_text(genai):
     prompt = prompt_text(genai)
     assert "We train on ImageNet with a sparse kernel." in prompt  # body text, not only the abstract
     assert "Paper Title" in prompt
+    # Each author name reaches the model intact (Q&A can answer "who wrote this?")
+    for name in ("Ada Lovelace", "Alan Turing"):
+        assert re.search(rf"(?<!\w){name}(?!\w)", prompt), name
 
 
 def test_summary_asks_for_the_documented_sections(genai):
@@ -188,6 +257,9 @@ def test_very_long_paper_is_truncated(fake_llm, monkeypatch, provider):
     assert "BEGINNING" in prompt
     assert "TAIL" not in prompt
     assert len(prompt) < 250_000  # roughly 60k tokens at ~4 characters per token
+    # The model is told the text is incomplete, so it doesn't present the excerpt as the whole paper
+    assert "truncated" in prompt.lower()
+    assert "None" not in prompt
 
 
 def test_summary_of_paper_with_unknown_metadata(genai):
@@ -229,6 +301,51 @@ def test_long_conversations_keep_the_most_recent_messages(genai):
     assert sent_messages(genai)[-1] == {"role": "user", "content": "latest?"}
 
 
+def test_every_request_caps_the_output_length(genai):
+    # Without a cap, reasoning models can run on and spend the user's credits (OpenRouter)
+    genai.replies = [completion("summary"), completion("answer"), completion('{"title": "T"}')]
+
+    summarize(make_paper())
+    answer_question(make_paper(), [], "Q?")
+    extract_metadata("text")
+
+    for call in genai.all_calls():
+        assert isinstance(call.get("max_tokens"), int) and call["max_tokens"] > 0
+
+
+# --- the fake enforces the chat API's request rules --------------------------------------------
+
+
+def valid_request(**overrides):
+    return {"model": "m", "messages": [{"role": "user", "content": "hi"}], **overrides}
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        valid_request(messages=[{"ROLE": "user", "content": "hi"}]),
+        valid_request(messages=[{"role": "USER", "content": "hi"}]),
+        valid_request(messages=[{"role": "user", "content": "hi", "extra": 1}]),
+        valid_request(messages=[{"role": "user"}]),
+        valid_request(messages=[]),
+        valid_request(model=""),
+        valid_request(max_tokens=None, temperature=3),
+        valid_request(max_tokens=0),
+        valid_request(unknown_param=True),
+    ],
+)
+def test_fake_llm_rejects_requests_the_api_would(genai, request_kwargs):
+    genai.replies = [completion("never returned")]
+    client = FakeOpenAI(api_key="k", base_url="https://llm.invalid")
+    with pytest.raises(openai.BadRequestError):
+        client.chat.completions.create(**request_kwargs)
+
+
+def test_fake_llm_rejects_client_settings_the_sdk_would(fake_llm):
+    with pytest.raises(TypeError):
+        FakeOpenAI(api_key="k", base_url="https://llm.invalid", max_retries=None)
+
+
 # --- retries and errors -----------------------------------------------------------------------
 
 
@@ -245,9 +362,10 @@ def test_null_responses_are_retried_after_waiting(genai, sleeps):
 def test_persistent_null_responses_ask_the_user_to_try_again(genai, sleeps):
     genai.replies = [None] * 10
 
-    with pytest.raises(LLMError, match="try again in a minute"):
+    with pytest.raises(LLMError) as exc:
         summarize(make_paper())
 
+    assert str(exc.value) == "The LLM service is rate-limiting requests. Please try again in a minute."
     attempts = len(genai.all_calls())
     assert attempts > 1
     assert len(sleeps) == attempts - 1
@@ -276,27 +394,30 @@ def test_unstructured_error_bodies_are_never_shown(genai, body):
     genai.replies = [api_error(body)]
     with pytest.raises(LLMError) as exc:
         summarize(make_paper())
-    assert "LLM request failed" in str(exc.value)
-    assert "org_abc123" not in str(exc.value)
+    # Only the kind of error is shown, never the raw body
+    assert str(exc.value) == "LLM request failed: APIError"
 
 
 def test_connection_error_becomes_llm_error(genai):
     genai.replies = [openai.APIConnectionError(request=httpx2.Request("POST", "https://llm.invalid"))]
-    with pytest.raises(LLMError, match="LLM request failed"):
+    with pytest.raises(LLMError) as exc:
         answer_question(make_paper(), [], "Q?")
+    assert str(exc.value) == "LLM request failed: APIConnectionError"
 
 
 @pytest.mark.parametrize("reply", [completion(""), completion(None), SimpleNamespace(choices=[])])
 def test_empty_reply_is_an_error(genai, reply):
     genai.replies = [reply]
-    with pytest.raises(LLMError):
+    with pytest.raises(LLMError) as exc:
         summarize(make_paper())
+    assert str(exc.value) == "LLM returned an empty response"
 
 
 def test_reply_cut_off_by_the_output_limit_is_an_error(genai):
     genai.replies = [completion(None, finish_reason="length")]
-    with pytest.raises(LLMError, match="output limit"):
+    with pytest.raises(LLMError) as exc:
         summarize(make_paper())
+    assert str(exc.value) == "The LLM reached its output limit before answering. Please try again."
 
 
 # --- extract_metadata (requirement 3) -----------------------------------------------------------
@@ -315,6 +436,12 @@ def test_extract_metadata_handles_code_fences_and_prose(genai):
     genai.replies = [completion('Here you go:\n```json\n{"title": "T", "authors": [], "year": null, '
                                 '"abstract": null}\n```')]
     assert extract_metadata("x") == {"title": "T", "authors": [], "year": None, "abstract": None}
+
+
+def test_extract_metadata_handles_pretty_printed_json_in_fences(genai):
+    raw = 'Sure!\n```json\n{\n  "title": "Multi Line",\n  "authors": [\n    "Ada Lovelace"\n  ],\n  "year": 2020\n}\n```'
+    genai.replies = [completion(raw)]
+    assert extract_metadata("x") == {"title": "Multi Line", "authors": ["Ada Lovelace"], "year": 2020, "abstract": None}
 
 
 def test_extract_metadata_defaults_missing_fields(genai):

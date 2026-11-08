@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import create_engine
 
 import app.db as db
 import app.llm as llm
@@ -85,6 +86,24 @@ def test_uses_temporary_data_dir(client, data_dir, pdf_dir):
     # The lifespan's init_db() created the PDF folder and the database in the temp dir
     assert pdf_dir.is_dir()
     assert (data_dir / "library.db").exists()
+
+
+def test_first_run_creates_the_data_folder(tmp_path, monkeypatch):
+    # README: the database and PDFs are created automatically in backend/data/ on first run
+    data = tmp_path / "fresh-checkout" / "data"
+    engine = create_engine(f"sqlite:///{data / 'library.db'}", connect_args={"check_same_thread": False})
+    for module in (db, main):
+        monkeypatch.setattr(module, "PDF_DIR", data / "pdfs")
+        monkeypatch.setattr(module, "engine", engine)
+    assert not data.parent.exists()
+
+    try:
+        with TestClient(main.app) as client:
+            assert client.get("/api/papers").json() == []
+        assert (data / "pdfs").is_dir()
+        assert (data / "library.db").is_file()
+    finally:
+        engine.dispose()
 
 
 def test_health(client):
@@ -194,6 +213,32 @@ def test_save_paper_downloads_full_text_in_background(client, fake_download, sto
     assert "We propose a new sparse kernel." in paper.full_text
     assert stored.pdf_files() == [f"{body['id']}.pdf"]
     assert client.get(f"/api/papers/{body['id']}").json()["has_pdf"] is True
+
+
+def test_save_paper_downloads_the_pdf_from_arxiv(client, monkeypatch, stored):
+    # The real download code against a faked arXiv: the request goes to the result's PDF link
+    pdf_bytes = make_pdf(SAMPLE_PAPER_PAGES)
+    fake = FakeHTTP(httpx.Response(200, content=pdf_bytes)).install(monkeypatch)
+
+    paper_id = client.post("/api/papers", json=SAVE_BODY).json()["id"]
+
+    assert [str(r.url) for r in fake.requests] == [SAVE_BODY["pdf_url"]]
+    assert stored.paper(paper_id).text_status == "ready"
+    assert client.get(f"/api/papers/{paper_id}/pdf").content == pdf_bytes
+
+
+@pytest.mark.parametrize("reply", [(404, "Not Found"), httpx.ConnectError("network down")],
+                         ids=["http-404", "connection-error"])
+def test_download_failing_before_any_bytes_marks_failed(client, monkeypatch, stored, reply):
+    # No file was written, so cleanup must not fail and leave the paper stuck at "pending"
+    FakeHTTP(reply).install(monkeypatch)
+
+    paper_id = client.post("/api/papers", json=SAVE_BODY).json()["id"]
+
+    paper = stored.paper(paper_id)
+    assert paper.text_status == "failed"
+    assert paper.pdf_path is None
+    assert stored.pdf_files() == []
 
 
 def test_save_paper_stores_the_search_metadata(client, fake_download, stored):
@@ -604,20 +649,25 @@ def test_regenerate_summary(client, add_paper, llm_calls, stored):
     assert stored.paper(paper.id).summary == "New"
 
 
+# Shown to the user by the summary and chat panels
+STILL_PROCESSING = "The paper's full text is still being processed. Try again shortly."
+NOT_AVAILABLE = "The paper's full text is not available, so it can't be analyzed."
+
+
 @pytest.mark.parametrize(
     ("status", "text", "message"),
     [
-        ("pending", None, "still being processed"),
-        ("failed", None, "not available"),
-        ("ready", None, "not available"),
-        ("ready", "", "not available"),
+        ("pending", None, STILL_PROCESSING),
+        ("failed", None, NOT_AVAILABLE),
+        ("ready", None, NOT_AVAILABLE),
+        ("ready", "", NOT_AVAILABLE),
     ],
 )
 def test_summary_requires_full_text(client, add_paper, llm_calls, stored, status, text, message):
     paper = add_paper(text_status=status, full_text=text)
     resp = client.post(f"/api/papers/{paper.id}/summary")
     assert resp.status_code == 409
-    assert message in resp.json()["detail"]
+    assert resp.json()["detail"] == message
     assert llm_calls["calls"] == []
     assert stored.paper(paper.id).summary is None
 
@@ -700,12 +750,12 @@ def test_ask_question_llm_error_stores_nothing(client, add_paper, llm_calls, sto
     assert stored.messages() == []
 
 
-@pytest.mark.parametrize(("status", "message"), [("pending", "still being processed"), ("failed", "not available")])
+@pytest.mark.parametrize(("status", "message"), [("pending", STILL_PROCESSING), ("failed", NOT_AVAILABLE)])
 def test_ask_question_requires_full_text(client, add_paper, llm_calls, stored, status, message):
     paper = add_paper(text_status=status, full_text=None)
     resp = client.post(f"/api/papers/{paper.id}/chat", json={"question": "Q"})
     assert resp.status_code == 409
-    assert message in resp.json()["detail"]
+    assert resp.json()["detail"] == message
     assert llm_calls["calls"] == []
     assert stored.messages() == []
 

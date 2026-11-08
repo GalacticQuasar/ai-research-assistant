@@ -111,11 +111,29 @@ def test_every_keyword_is_required_and_the_limit_is_honored(monkeypatch, sleeps)
     search_arxiv("diffusion models", limit=5)
 
     request = fake.requests[0]
+    assert request.method == "GET"
     assert request.url.host == "export.arxiv.org"
     terms, operators = sent_query(request)
     assert terms == {"diffusion", "models"}
     assert operators == {"AND"}
-    assert request.url.params["max_results"] == "5"
+    # Documented arXiv API parameters: the first page, the user's limit, best matches first
+    params = request.url.params
+    assert sorted(params.keys()) == ["max_results", "search_query", "sortBy", "start"]
+    assert params["start"] == "0"
+    assert params["max_results"] == "5"
+    assert params["sortBy"] == "relevance"
+
+
+def test_requests_identify_the_client_and_time_out(monkeypatch, sleeps):
+    # arXiv asks API clients to identify themselves; a stalled request must not hang forever
+    fake = arxiv(monkeypatch, (200, EMPTY_FEED))
+
+    search_arxiv("attention")
+
+    request = fake.requests[0]
+    assert request.headers["User-Agent"] == search.USER_AGENT
+    assert not request.headers["User-Agent"].startswith("python-httpx")
+    assert all(value is not None for value in request.extensions["timeout"].values())
 
 
 def test_topic_phrases_leave_out_stop_words(monkeypatch, sleeps):
@@ -174,11 +192,15 @@ def test_waits_and_retries_once_when_rate_limited(monkeypatch, sleeps, status):
 
 @pytest.mark.parametrize("status", [429, 503])
 def test_reports_rate_limit_when_retry_also_fails(monkeypatch, sleeps, status):
-    fake = arxiv(monkeypatch, (status, ""), (429, ""))
+    fake = arxiv(monkeypatch, (status, ""), (status, ""))
 
-    with pytest.raises(RateLimitedError, match="try again in a minute"):
+    with pytest.raises(RateLimitedError) as exc:
         search_arxiv("attention")
+
+    # The README documents this exact message
+    assert str(exc.value) == "arXiv is rate-limiting requests. Please try again in a minute."
     assert len(fake.requests) == 2
+    assert len(sleeps) == 1  # waits only between the two attempts, not after giving up
 
 
 def test_server_error_is_raised_without_retry(monkeypatch, sleeps):

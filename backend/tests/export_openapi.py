@@ -16,7 +16,15 @@ import dotenv
 # Importing the app would otherwise load backend/.env; the schema doesn't depend on it
 dotenv.load_dotenv = lambda *args, **kwargs: False  # noqa: E731
 
-CONTRACT_PATH = Path(__file__).resolve().parents[2] / "contract" / "openapi.json"
+def _find_contract() -> Path:
+    # Search upward so this also works from a copy of the tests (e.g. mutmut's mutants/ folder)
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "contract").is_dir():
+            return parent / "contract" / "openapi.json"
+    return Path(__file__).resolve().parents[2] / "contract" / "openapi.json"
+
+
+CONTRACT_PATH = _find_contract()
 
 
 def render_schema() -> str:

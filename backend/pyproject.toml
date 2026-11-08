@@ -17,6 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mutmut==3.8.1",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
 ]
@@ -31,3 +32,16 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.mutmut]
+source_paths = ["app/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# mutmut needs a green baseline: leave out the tests that fail on known app bugs
+pytest_add_cli_args = [
+    "--deselect", "tests/test_api.py::test_upload_falls_back_when_llm_returns_non_object_json",
+    "--deselect", "tests/test_api.py::test_get_pdf_when_file_was_removed_from_disk",
+    "--deselect", "tests/test_llm.py::test_extract_metadata_non_object_json_raises_llm_error[null]",
+    "--deselect", "tests/test_llm.py::test_extract_metadata_non_object_json_raises_llm_error[[\"Title\", \"Ada\"]]",
+    "--deselect", "tests/test_llm.py::test_extract_metadata_non_object_json_raises_llm_error[\"just a string\"]",
+    "--deselect", "tests/test_llm.py::test_extract_metadata_authors_string_is_not_split_into_characters",
+]

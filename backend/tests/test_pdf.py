@@ -7,7 +7,7 @@ requirements 4 and 5 depend on.
 import httpx
 import pytest
 
-from app import pdf
+from app import pdf, search
 from app.pdf import clean_line_breaks, download_pdf, extract_text, guess_metadata
 
 from .fakes import FakeHTTP, redirect
@@ -24,7 +24,12 @@ def test_download_saves_the_pdf(monkeypatch, tmp_path):
     download_pdf("https://arxiv.org/pdf/2401.01234v2", dest)
 
     assert dest.read_bytes() == data
-    assert str(fake.requests[0].url) == "https://arxiv.org/pdf/2401.01234v2"
+    request = fake.requests[0]
+    assert request.method == "GET"
+    assert str(request.url) == "https://arxiv.org/pdf/2401.01234v2"
+    # arXiv asks clients to identify themselves; a stalled download must not hang forever
+    assert request.headers["User-Agent"] == search.USER_AGENT
+    assert all(value is not None for value in request.extensions["timeout"].values())
 
 
 def test_download_follows_redirects(monkeypatch, tmp_path):

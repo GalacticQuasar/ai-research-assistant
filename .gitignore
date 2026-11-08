@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+mutants/
 
 # App data (SQLite DB, uploaded/downloaded PDFs)
 backend/data/
